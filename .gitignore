@@ -29,3 +29,7 @@ postgres_data/
 .DS_Store
 Thumbs.db
 
+# SSH keys (if accidentally added)
+*.pem
+*_key
+!selectel_key.example
