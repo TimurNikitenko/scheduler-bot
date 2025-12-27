@@ -46,7 +46,8 @@ from bot.handlers import (
     WAITING_WORKER_MENU, WAITING_WORKER_USER_ID, WAITING_WORKER_NAME, WAITING_ADMIN_USER_ID,
     WAITING_PERIOD_START, WAITING_PERIOD_END,
     WAITING_EVENT_ADDRESS, WAITING_EMPLOYEE_SLOT_SELECTION,
-    WAITING_FREE_TIME_EMPLOYEE, WAITING_EVENT_EMPLOYEES_COUNT
+    WAITING_FREE_TIME_EMPLOYEE, WAITING_EVENT_EMPLOYEES_COUNT,
+    WAITING_FREE_TIME_DELETE_DATE, WAITING_FREE_TIME_DELETE_SLOT
 )
 
 
@@ -80,16 +81,15 @@ async def main():
         entry_points=[MessageHandler(filters.Regex("^1\. Расписание$"), handlers.admin_schedule)],
         states={
             WAITING_DATE_RANGE: [
-                CallbackQueryHandler(handlers.admin_schedule_employee_selected, pattern="^emp_"),
-                CallbackQueryHandler(handlers.admin_schedule_period_selected, pattern="^period_"),
+                CallbackQueryHandler(handlers.admin_schedule_period_selected, pattern="^(period_|back)"),
                 CallbackQueryHandler(handlers.admin_schedule_period_start_selected, pattern="^period_start_"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.admin_schedule_date_range)
             ],
             WAITING_PERIOD_START: [
-                CallbackQueryHandler(handlers.admin_schedule_period_start_selected, pattern="^period_start_")
+                CallbackQueryHandler(handlers.admin_schedule_period_start_selected, pattern="^(period_start_|back)")
             ],
             WAITING_PERIOD_END: [
-                CallbackQueryHandler(handlers.admin_schedule_period_end_selected, pattern="^period_end_")
+                CallbackQueryHandler(handlers.admin_schedule_period_end_selected, pattern="^(period_end_|back)")
             ],
         },
         fallbacks=[
@@ -114,10 +114,11 @@ async def main():
             ],
             WAITING_EVENT_END: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.admin_event_end),
-                CallbackQueryHandler(handlers.admin_event_start, pattern="^back$")
+                CallbackQueryHandler(handlers.admin_event_start_back, pattern="^back$")
             ],
             WAITING_EVENT_ADDRESS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.admin_event_address)
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.admin_event_address),
+                CallbackQueryHandler(handlers.admin_event_address_back, pattern="^back$")
             ],
             WAITING_EVENT_EMPLOYEES_COUNT: [
                 CallbackQueryHandler(handlers.admin_event_employees_count, pattern="^(count_|back)")
@@ -174,13 +175,13 @@ async def main():
         entry_points=[MessageHandler(filters.Regex("^4\. Поставить смены$"), handlers.admin_set_shifts)],
         states={
             WAITING_SHIFT_DATE: [
-                CallbackQueryHandler(handlers.admin_shift_date_selected, pattern="^date_")
+                CallbackQueryHandler(handlers.admin_shift_date_selected, pattern="^(date_|back)")
             ],
             WAITING_SHIFT_SLOT: [
-                CallbackQueryHandler(handlers.admin_shift_slot_selected, pattern="^slot_")
+                CallbackQueryHandler(handlers.admin_shift_slot_selected, pattern="^(slot_|back)")
             ],
             WAITING_SHIFT_EMPLOYEE: [
-                CallbackQueryHandler(handlers.admin_shift_employee_selected, pattern="^emp_")
+                CallbackQueryHandler(handlers.admin_shift_employee_selected, pattern="^(emp_|back)")
             ],
         },
         fallbacks=[
@@ -195,15 +196,15 @@ async def main():
         entry_points=[MessageHandler(filters.Regex("^1\. Моя зарплата$"), handlers.employee_salary)],
         states={
             WAITING_SALARY_PERIOD: [
-                CallbackQueryHandler(handlers.employee_salary_period_selected, pattern="^period_"),
-                CallbackQueryHandler(handlers.employee_salary_period_start_selected, pattern="^period_start_"),
+                CallbackQueryHandler(handlers.employee_salary_period_selected, pattern="^(period_|back)"),
+                CallbackQueryHandler(handlers.employee_salary_period_start_selected, pattern="^(period_start_|back)"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.employee_salary_period)
             ],
             WAITING_PERIOD_START: [
-                CallbackQueryHandler(handlers.employee_salary_period_start_selected, pattern="^period_start_")
+                CallbackQueryHandler(handlers.employee_salary_period_start_selected, pattern="^(period_start_|back)")
             ],
             WAITING_PERIOD_END: [
-                CallbackQueryHandler(handlers.employee_salary_period_end_selected, pattern="^period_end_")
+                CallbackQueryHandler(handlers.employee_salary_period_end_selected, pattern="^(period_end_|back)")
             ],
         },
         fallbacks=[
@@ -218,7 +219,7 @@ async def main():
         entry_points=[MessageHandler(filters.Regex("^2\. Мое расписание$"), handlers.employee_schedule)],
         states={
             WAITING_SCHEDULE_DATE: [
-                CallbackQueryHandler(handlers.employee_schedule_date_selected, pattern="^date_"),
+                CallbackQueryHandler(handlers.employee_schedule_date_selected, pattern="^(date_|back)"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.employee_schedule_range)
             ],
         },
@@ -234,8 +235,8 @@ async def main():
         entry_points=[MessageHandler(filters.Regex("^3\. Доступные слоты$"), handlers.employee_available_slots)],
         states={
             WAITING_EMPLOYEE_SLOT_SELECTION: [
-                CallbackQueryHandler(handlers.employee_slot_date_selected, pattern="^date_"),
-                CallbackQueryHandler(handlers.employee_slot_selected, pattern="^slot_")
+                CallbackQueryHandler(handlers.employee_slot_date_selected, pattern="^(date_|back)"),
+                CallbackQueryHandler(handlers.employee_slot_selected, pattern="^(slot_|back)")
             ],
         },
         fallbacks=[
@@ -253,10 +254,17 @@ async def main():
         ],
         states={
             WAITING_FREE_TIME_DATE: [
-                CallbackQueryHandler(handlers.employee_free_time_date_selected, pattern="^date_")
+                CallbackQueryHandler(handlers.employee_free_time_action, pattern="^(add_free_time|delete_free_time|back)"),
+                CallbackQueryHandler(handlers.employee_free_time_date_selected, pattern="^(date_|back)")
             ],
             WAITING_FREE_TIME_SLOTS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.employee_free_time_slots)
+            ],
+            WAITING_FREE_TIME_DELETE_DATE: [
+                CallbackQueryHandler(handlers.employee_free_time_delete_date_selected, pattern="^(date_|back)")
+            ],
+            WAITING_FREE_TIME_DELETE_SLOT: [
+                CallbackQueryHandler(handlers.employee_free_time_delete_slot_selected, pattern="^(free_time_|back)")
             ],
         },
         fallbacks=[

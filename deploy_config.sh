@@ -4,7 +4,7 @@
 # You can override these values by setting environment variables
 
 # Remote server connection
-export DEPLOY_HOST="${DEPLOY_HOST:-root@84.35.184.210}"
+export DEPLOY_HOST="${DEPLOY_HOST:-root@84.38.182.210}"
 export DEPLOY_DIR="${DEPLOY_DIR:-/opt/telegram-bot}"
 
 # SSH key path (optional)

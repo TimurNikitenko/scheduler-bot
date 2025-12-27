@@ -274,7 +274,7 @@ class Database:
             """, date_obj)
             return [dict(row) for row in rows]
 
-    async def get_schedule_slots_by_range(self, start_date: str, end_date: str, employee_id: Optional[int] = None, only_open: bool = False) -> List[Dict]:
+    async def get_schedule_slots_by_range(self, start_date: str, end_date: str, employee_id: Optional[int] = None, only_open: bool = False, exclude_employee_id: Optional[int] = None) -> List[Dict]:
         self._ensure_pool()
         # Convert strings to date objects for asyncpg
         start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
@@ -293,16 +293,41 @@ class Database:
                 """, employee_id, start_date_obj, end_date_obj)
             else:
                 if only_open:
-                    rows = await conn.fetch("""
-                        SELECT s.id, s.date, s.start_time, s.end_time, s.address,
-                               s.location_latitude, s.location_longitude, s.required_employees, s.is_open,
-                               sh.employee_id, u.full_name
-                        FROM schedule_slots s
-                        LEFT JOIN shifts sh ON s.id = sh.slot_id
-                        LEFT JOIN users u ON sh.employee_id = u.user_id
-                        WHERE s.date BETWEEN $1 AND $2 AND s.is_open = TRUE AND sh.employee_id IS NULL
-                        ORDER BY s.date, s.start_time
-                    """, start_date_obj, end_date_obj)
+                    # Get open slots that have available space (not fully booked)
+                    # Exclude slots where the employee is already assigned (if exclude_employee_id is provided)
+                    if exclude_employee_id:
+                        rows = await conn.fetch("""
+                            SELECT s.id, s.date, s.start_time, s.end_time, s.address,
+                                   s.location_latitude, s.location_longitude, s.required_employees, s.is_open
+                            FROM schedule_slots s
+                            WHERE s.date BETWEEN $1 AND $2 
+                            AND s.is_open = TRUE
+                            AND (
+                                SELECT COUNT(*) 
+                                FROM shifts sh 
+                                WHERE sh.slot_id = s.id
+                            ) < s.required_employees
+                            AND NOT EXISTS (
+                                SELECT 1 
+                                FROM shifts sh 
+                                WHERE sh.slot_id = s.id AND sh.employee_id = $3
+                            )
+                            ORDER BY s.date, s.start_time
+                        """, start_date_obj, end_date_obj, exclude_employee_id)
+                    else:
+                        rows = await conn.fetch("""
+                            SELECT s.id, s.date, s.start_time, s.end_time, s.address,
+                                   s.location_latitude, s.location_longitude, s.required_employees, s.is_open
+                            FROM schedule_slots s
+                            WHERE s.date BETWEEN $1 AND $2 
+                            AND s.is_open = TRUE
+                            AND (
+                                SELECT COUNT(*) 
+                                FROM shifts sh 
+                                WHERE sh.slot_id = s.id
+                            ) < s.required_employees
+                            ORDER BY s.date, s.start_time
+                        """, start_date_obj, end_date_obj)
                 else:
                     rows = await conn.fetch("""
                         SELECT s.id, s.date, s.start_time, s.end_time, s.address,
@@ -326,6 +351,29 @@ class Database:
                 WHERE id = $2
             """, is_open, slot_id)
     
+    async def get_slot_assigned_count(self, slot_id: int) -> int:
+        """Get count of employees assigned to a slot"""
+        self._ensure_pool()
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT COUNT(*) as count
+                FROM shifts
+                WHERE slot_id = $1
+            """, slot_id)
+            return row['count'] if row else 0
+    
+    async def get_slot_by_id(self, slot_id: int) -> Optional[Dict]:
+        """Get slot information by ID"""
+        self._ensure_pool()
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT id, date, start_time, end_time, address,
+                       location_latitude, location_longitude, required_employees, is_open
+                FROM schedule_slots
+                WHERE id = $1
+            """, slot_id)
+            return dict(row) if row else None
+    
     async def get_user_display_name(self, user_id: int) -> str:
         """Get user display name"""
         user = await self.get_user_by_id(user_id)
@@ -341,9 +389,9 @@ class Database:
         self._ensure_pool()
         async with self._pool.acquire() as conn:
             async with conn.transaction():
-                # Get slot info
+                # Get slot info including required_employees
                 slot = await conn.fetchrow("""
-                    SELECT date, start_time, end_time 
+                    SELECT date, start_time, end_time, required_employees
                     FROM schedule_slots 
                     WHERE id = $1
                 """, slot_id)
@@ -359,29 +407,88 @@ class Database:
                     if existing:
                         raise ValueError("Employee already has a shift at this time")
                     
+                    # Check if slot is already fully booked
+                    assigned_count = await conn.fetchval("""
+                        SELECT COUNT(*) 
+                        FROM shifts 
+                        WHERE slot_id = $1
+                    """, slot_id)
+                    
+                    slot_info = await conn.fetchrow("""
+                        SELECT required_employees
+                        FROM schedule_slots 
+                        WHERE id = $1
+                    """, slot_id)
+                    
+                    if slot_info:
+                        required = slot_info['required_employees']
+                        if assigned_count >= required:
+                            raise ValueError(f"Слот уже полностью заполнен. Требуется {required} сотрудник(ов), уже назначено {assigned_count}.")
+                    
                     await conn.execute("""
                         INSERT INTO shifts (slot_id, employee_id, date, start_time, end_time)
                         VALUES ($1, $2, $3, $4, $5)
                     """, slot_id, employee_id, slot['date'], slot['start_time'], slot['end_time'])
                     
-                    # Mark slot as not open
+                    # Remove overlapping free time slots for this employee
+                    # Delete free time slots that overlap with the shift
                     await conn.execute("""
-                        UPDATE schedule_slots 
-                        SET is_open = FALSE 
+                        DELETE FROM free_time_slots
+                        WHERE employee_id = $1 
+                        AND date = $2
+                        AND start_time < $3 
+                        AND end_time > $4
+                    """, employee_id, slot['date'], slot['end_time'], slot['start_time'])
+                    
+                    # Check if slot is fully booked and close it if needed
+                    assigned_count = await conn.fetchval("""
+                        SELECT COUNT(*) 
+                        FROM shifts 
+                        WHERE slot_id = $1
+                    """, slot_id)
+                    
+                    slot_info = await conn.fetchrow("""
+                        SELECT required_employees 
+                        FROM schedule_slots 
                         WHERE id = $1
                     """, slot_id)
+                    
+                    if slot_info and assigned_count >= slot_info['required_employees']:
+                        # Slot is fully booked, close it
+                        await conn.execute("""
+                            UPDATE schedule_slots 
+                            SET is_open = FALSE 
+                            WHERE id = $1
+                        """, slot_id)
 
     async def get_employee_shifts(self, employee_id: int, start_date: str, end_date: str) -> List[Dict]:
+        """Get employee shifts with slot details"""
         self._ensure_pool()
         # Convert strings to date objects for asyncpg
         start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
         end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
         async with self._pool.acquire() as conn:
+            # Debug: check if there are any shifts for this employee
+            debug_rows = await conn.fetch("""
+                SELECT sh.id, sh.slot_id, sh.employee_id, sh.date, sh.start_time, sh.end_time
+                FROM shifts sh
+                WHERE sh.employee_id = $1 AND sh.date BETWEEN $2 AND $3
+            """, employee_id, start_date_obj, end_date_obj)
+            import logging
+            import sys
+            logging.critical(f"DEBUG get_employee_shifts: employee_id={employee_id}, date_range={start_date}-{end_date}, raw_shifts_count={len(debug_rows)}")
+            print(f"DEBUG get_employee_shifts: employee_id={employee_id}, date_range={start_date}-{end_date}, raw_shifts_count={len(debug_rows)}", file=sys.stderr, flush=True)
+            for row in debug_rows:
+                logging.critical(f"DEBUG raw shift: {dict(row)}")
+                print(f"DEBUG raw shift: {dict(row)}", file=sys.stderr, flush=True)
+            
             rows = await conn.fetch("""
-                SELECT date, start_time, end_time
-                FROM shifts
-                WHERE employee_id = $1 AND date BETWEEN $2 AND $3
-                ORDER BY date, start_time
+                SELECT sh.date, sh.start_time, sh.end_time,
+                       s.address, s.required_employees
+                FROM shifts sh
+                INNER JOIN schedule_slots s ON sh.slot_id = s.id
+                WHERE sh.employee_id = $1 AND sh.date BETWEEN $2 AND $3
+                ORDER BY sh.date, sh.start_time
             """, employee_id, start_date_obj, end_date_obj)
             return [dict(row) for row in rows]
 
@@ -405,6 +512,17 @@ class Database:
                 VALUES ($1, $2, $3, $4)
             """, employee_id, date_obj, start_time_obj, end_time_obj)
     
+    async def delete_free_time_slot(self, free_time_id: int, employee_id: int):
+        """Delete a free time slot by ID (only if it belongs to the employee)"""
+        self._ensure_pool()
+        async with self._pool.acquire() as conn:
+            result = await conn.execute("""
+                DELETE FROM free_time_slots
+                WHERE id = $1 AND employee_id = $2
+            """, free_time_id, employee_id)
+            if result == "DELETE 0":
+                raise ValueError("Свободное время не найдено или не принадлежит вам")
+    
     async def get_employee_free_time(self, employee_id: int, start_date: str = None, end_date: str = None) -> List[Dict]:
         """Get free time slots for an employee"""
         self._ensure_pool()
@@ -426,6 +544,62 @@ class Database:
                     WHERE employee_id = $1
                     ORDER BY date, start_time
                 """, employee_id)
+            return [dict(row) for row in rows]
+    
+    async def remove_overlapping_free_time(self, employee_id: int, date_str: str, start_time: str, end_time: str):
+        """Remove free time slots that overlap with assigned shift"""
+        self._ensure_pool()
+        # Convert strings to date and time objects for asyncpg
+        date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+        # Parse time strings
+        try:
+            start_time_obj = datetime.strptime(start_time, "%H:%M").time()
+        except ValueError:
+            start_time_obj = datetime.strptime(start_time, "%H:%M:%S").time()
+        try:
+            end_time_obj = datetime.strptime(end_time, "%H:%M").time()
+        except ValueError:
+            end_time_obj = datetime.strptime(end_time, "%H:%M:%S").time()
+        
+        async with self._pool.acquire() as conn:
+            # Delete free time slots that overlap with the shift
+            # Overlap condition: free_time_start < shift_end AND free_time_end > shift_start
+            await conn.execute("""
+                DELETE FROM free_time_slots
+                WHERE employee_id = $1 
+                AND date = $2
+                AND start_time < $3 
+                AND end_time > $4
+            """, employee_id, date_obj, end_time_obj, start_time_obj)
+    
+    async def get_employees_with_free_time(self, date_str: str, start_time: str, end_time: str) -> List[Dict]:
+        """Get employees who have free time that overlaps with the given time slot"""
+        self._ensure_pool()
+        # Convert strings to date and time objects for asyncpg
+        date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+        # Parse time strings
+        try:
+            start_time_obj = datetime.strptime(start_time, "%H:%M").time()
+        except ValueError:
+            start_time_obj = datetime.strptime(start_time, "%H:%M:%S").time()
+        try:
+            end_time_obj = datetime.strptime(end_time, "%H:%M").time()
+        except ValueError:
+            end_time_obj = datetime.strptime(end_time, "%H:%M:%S").time()
+        
+        async with self._pool.acquire() as conn:
+            # Find employees with free time that overlaps with the slot
+            # Overlap condition: free_time_start < slot_end AND free_time_end > slot_start
+            rows = await conn.fetch("""
+                SELECT DISTINCT u.user_id, u.full_name, u.username, ft.start_time as free_start, ft.end_time as free_end
+                FROM users u
+                INNER JOIN free_time_slots ft ON u.user_id = ft.employee_id
+                WHERE u.is_admin = FALSE
+                AND ft.date = $1
+                AND ft.start_time < $2 
+                AND ft.end_time > $3
+                ORDER BY u.full_name
+            """, date_obj, end_time_obj, start_time_obj)
             return [dict(row) for row in rows]
 
     async def get_available_employees_for_slot(self, slot_id: int) -> List[Tuple[int, str]]:
