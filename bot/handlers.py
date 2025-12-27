@@ -8,7 +8,8 @@ from .keyboards import (
     get_main_keyboard, get_employee_selection_keyboard, get_schedule_edit_keyboard,
     get_date_selection_keyboard, get_slot_selection_keyboard, get_yes_no_keyboard,
     get_cancel_keyboard, get_worker_management_keyboard,
-    get_period_selection_keyboard, get_period_start_date_keyboard, get_period_end_date_keyboard
+    get_period_selection_keyboard, get_period_start_date_keyboard, get_period_end_date_keyboard,
+    get_back_keyboard, get_employees_count_keyboard
 )
 
 # Conversation states
@@ -20,8 +21,10 @@ from .keyboards import (
     WAITING_SALARY_PERIOD, WAITING_SCHEDULE_DATE_RANGE, WAITING_SCHEDULE_DATE,
     WAITING_FREE_TIME_DATE, WAITING_FREE_TIME_SLOTS,
     WAITING_WORKER_MENU, WAITING_WORKER_USER_ID, WAITING_WORKER_NAME, WAITING_ADMIN_USER_ID,
-    WAITING_PERIOD_START, WAITING_PERIOD_END
-) = range(24)
+    WAITING_PERIOD_START, WAITING_PERIOD_END,
+    WAITING_EVENT_ADDRESS, WAITING_EMPLOYEE_SLOT_SELECTION,
+    WAITING_FREE_TIME_EMPLOYEE, WAITING_EVENT_EMPLOYEES_COUNT
+) = range(28)
 
 
 class BotHandlers:
@@ -38,8 +41,9 @@ class BotHandlers:
         """Check if text is a menu command"""
         menu_commands = [
             "1. Расписание", "2. Редактировать расписание", "3. Отчет",
-            "4. Поставить смены", "5. Управление сотрудниками",
-            "1. Моя зарплата", "2. Мое расписание", "3. Выставить свободное время"
+            "4. Поставить смены", "5. Управление сотрудниками", "6. Сотрудник свободен в",
+            "1. Моя зарплата", "2. Мое расписание", "3. Доступные слоты", 
+            "4. Указать свободное время", "3. Выставить свободное время"
         ]
         return text.strip() in menu_commands
 
@@ -81,23 +85,74 @@ class BotHandlers:
     
     async def admin_schedule(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Admin: View schedule"""
+        import logging
+        import sys
+        logger = logging.getLogger(__name__)
         try:
-            employees = await self.db.get_all_employees()
-            if not employees:
-                await update.message.reply_text(
-                    "Нет сотрудников в базе.\n"
-                    "Добавьте сотрудников через меню '5. Управление сотрудниками' -> 'Добавить сотрудника'"
-                )
-                return ConversationHandler.END
+            # Force flush to ensure logs are written - use stderr which is always captured
+            print("=" * 50, file=sys.stderr, flush=True)
+            print("DEBUG admin_schedule START", file=sys.stderr, flush=True)
+            print("=" * 50, file=sys.stderr, flush=True)
+            logger.critical("=" * 50)
+            logger.critical("DEBUG admin_schedule START")
+            logger.critical("=" * 50)
             
-            keyboard = get_employee_selection_keyboard(employees)
-            await update.message.reply_text(
-                "Выберите сотрудника или 'Все':",
-                reply_markup=keyboard
-            )
-            # Return a state that will handle the callback query
-            # We'll use WAITING_DATE_RANGE but first handle employee selection
-            return WAITING_DATE_RANGE
+            employees = await self.db.get_all_employees()
+            msg = f"DEBUG admin_schedule: found {len(employees)} employees"
+            print(msg, file=sys.stderr, flush=True)
+            logger.critical(msg)
+            
+            # Debug: check all users
+            all_users = await self.db.get_all_users()
+            msg = f"DEBUG admin_schedule: total users in DB: {len(all_users)}"
+            print(msg, file=sys.stderr, flush=True)
+            logger.critical(msg)
+            for user in all_users:
+                user_info = f"DEBUG User {user['user_id']}: is_admin={user.get('is_admin')}, name={user.get('full_name')}, username={user.get('username')}"
+                print(user_info, file=sys.stderr, flush=True)
+                logger.critical(user_info)
+            
+            # Allow viewing schedule even without employees - show all slots
+            if employees:
+                keyboard = get_employee_selection_keyboard(employees)
+                await update.message.reply_text(
+                    "Выберите сотрудника или 'Все':",
+                    reply_markup=keyboard
+                )
+                # Return a state that will handle the callback query
+                # We'll use WAITING_DATE_RANGE but first handle employee selection
+                return WAITING_DATE_RANGE
+            else:
+                # No employees, but allow viewing all slots
+                # Check if there are any users at all
+                if all_users:
+                    non_admin_users = [u for u in all_users if not u.get('is_admin')]
+                    if not non_admin_users:
+                        await update.message.reply_text(
+                            "В базе есть пользователи, но все они являются администраторами.\n"
+                            "Для просмотра расписания по сотрудникам добавьте сотрудников через меню '5. Управление сотрудниками'.\n\n"
+                            "Просмотр всех слотов:"
+                        )
+                    else:
+                        await update.message.reply_text(
+                            "Нет сотрудников в базе.\n"
+                            "Добавьте сотрудников через меню '5. Управление сотрудниками' -> 'Добавить сотрудника'.\n\n"
+                            "Просмотр всех слотов:"
+                        )
+                else:
+                    await update.message.reply_text(
+                        "Нет сотрудников в базе.\n"
+                        "Добавьте сотрудников через меню '5. Управление сотрудниками' -> 'Добавить сотрудника'.\n\n"
+                        "Просмотр всех слотов:"
+                    )
+                
+                context.user_data['schedule_employee'] = None
+                keyboard = get_period_selection_keyboard()
+                await update.message.reply_text(
+                    "Выберите период:",
+                    reply_markup=keyboard
+                )
+                return WAITING_DATE_RANGE
         except Exception as e:
             import logging
             logging.error(f"Error in admin_schedule: {e}", exc_info=True)
@@ -162,7 +217,11 @@ class BotHandlers:
                     start_time = slot['start_time']
                     end_time = slot['end_time']
                     employee_name = slot.get('full_name') or "Свободно"
-                    schedule_text += f"  {start_time}-{end_time}: {employee_name}\n"
+                    required = slot.get('required_employees', 1)
+                    schedule_text += f"  {start_time}-{end_time}: {employee_name}"
+                    if slot.get('address'):
+                        schedule_text += f"\n    📍 {slot['address']}"
+                    schedule_text += f"\n    👥 Нужно: {required} чел.\n"
                 
                 await query.edit_message_text(schedule_text)
                 return ConversationHandler.END
@@ -218,7 +277,11 @@ class BotHandlers:
                 start_time = slot['start_time']
                 end_time = slot['end_time']
                 employee_name = slot.get('full_name') or "Свободно"
-                schedule_text += f"  {start_time}-{end_time}: {employee_name}\n"
+                required = slot.get('required_employees', 1)
+                schedule_text += f"  {start_time}-{end_time}: {employee_name}"
+                if slot.get('address'):
+                    schedule_text += f"\n    📍 {slot['address']}"
+                schedule_text += f"\n    👥 Нужно: {required} чел.\n"
             
             await query.edit_message_text(schedule_text)
             # Clean up
@@ -298,20 +361,43 @@ class BotHandlers:
         if query.data.startswith("date_"):
             date_str = query.data.split("_")[1]
             context.user_data['event_date'] = date_str
+            keyboard = get_back_keyboard()
             await query.edit_message_text(
-                f"Дата: {date_str}\nВведите время начала (формат: ЧЧ:ММ):"
+                f"Дата: {date_str}\nВведите время начала (формат: ЧЧ:ММ):",
+                reply_markup=keyboard
             )
             return WAITING_EVENT_START
+        elif query.data == "back":
+            # Go back to event menu
+            keyboard = get_schedule_edit_keyboard()
+            await query.edit_message_text(
+                "Выберите действие:",
+                reply_markup=keyboard
+            )
+            return WAITING_EVENT_DATE
         return WAITING_EVENT_DATE
 
     async def admin_event_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text.strip()
+        
+        if self.is_menu_command(text):
+            await update.message.reply_text("Операция отменена. Используйте выбранную команду.")
+            return ConversationHandler.END
+        
         if re.match(r'^\d{2}:\d{2}$', text):
             context.user_data['event_start'] = text
-            await update.message.reply_text("Введите время окончания (формат: ЧЧ:ММ):")
+            keyboard = get_back_keyboard()
+            await update.message.reply_text(
+                "Введите время окончания (формат: ЧЧ:ММ):",
+                reply_markup=keyboard
+            )
             return WAITING_EVENT_END
         else:
-            await update.message.reply_text("Неверный формат. Введите время в формате ЧЧ:ММ:")
+            keyboard = get_back_keyboard()
+            await update.message.reply_text(
+                "Неверный формат. Введите время в формате ЧЧ:ММ:",
+                reply_markup=keyboard
+            )
             return WAITING_EVENT_START
 
     async def admin_event_end(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -337,41 +423,142 @@ class BotHandlers:
                 return WAITING_EVENT_END
             
             context.user_data['event_end'] = text
-            
-            keyboard = get_yes_no_keyboard("assign")
+            keyboard = get_back_keyboard()
             await update.message.reply_text(
-                "Назначить сотрудника на этот слот?",
+                "Введите адрес работы (улица, дом):\n"
+                "Например: ул. Геолокации, д. 4",
                 reply_markup=keyboard
             )
-            return WAITING_ASSIGN_EMPLOYEE
+            return WAITING_EVENT_ADDRESS
         else:
             await update.message.reply_text("Неверный формат. Введите время в формате ЧЧ:ММ:")
             return WAITING_EVENT_END
 
+    async def admin_event_address(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle address input"""
+        text = update.message.text.strip()
+        
+        if self.is_menu_command(text):
+            await update.message.reply_text("Операция отменена. Используйте выбранную команду.")
+            return ConversationHandler.END
+        
+        # Check for back button
+        if text == "◀️ Назад" or text.lower() == "назад":
+            keyboard = get_back_keyboard()
+            await update.message.reply_text(
+                "Введите время окончания (формат: ЧЧ:ММ):",
+                reply_markup=keyboard
+            )
+            return WAITING_EVENT_END
+        
+        context.user_data['event_address'] = text
+        
+        # Ask for employees count
+        keyboard = get_employees_count_keyboard()
+        await update.message.reply_text(
+            f"Адрес: {text}\n\n"
+            "Сколько человек нужно для этого события?",
+            reply_markup=keyboard
+        )
+        return WAITING_EVENT_EMPLOYEES_COUNT
+    
+    async def admin_event_employees_count(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle employees count selection"""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data.startswith("count_"):
+            count = int(query.data.split("_")[1])
+            context.user_data['event_employees_count'] = count
+            
+            # Create slot with all info
+            await self._create_slot_from_context(context, query)
+            return WAITING_ASSIGN_EMPLOYEE
+        elif query.data == "back":
+            # Go back to address input
+            keyboard = get_back_keyboard()
+            await query.edit_message_text(
+                "Введите адрес работы (улица, дом):\n"
+                "Например: ул. Геолокации, д. 4",
+                reply_markup=keyboard
+            )
+            return WAITING_EVENT_ADDRESS
+        
+        return WAITING_EVENT_EMPLOYEES_COUNT
+    
+    async def _create_slot_from_context(self, context: Dict, message_or_query):
+        """Helper to create slot from context and ask about assignment"""
+        event_date = context.user_data.get('event_date')
+        event_start = context.user_data.get('event_start')
+        event_end = context.user_data.get('event_end')
+        address = context.user_data.get('event_address')
+        required_employees = context.user_data.get('event_employees_count', 1)
+        
+        # Create slot (will be assigned later if needed)
+        slot_id = await self.db.add_schedule_slot(
+            event_date, event_start, event_end,
+            address=address,
+            location_latitude=None,
+            location_longitude=None,
+            required_employees=required_employees,
+            is_open=True
+        )
+        context.user_data['created_slot_id'] = slot_id
+        
+        keyboard = get_yes_no_keyboard("assign")
+        text = f"✅ Слот создан:\n"
+        text += f"Дата: {event_date}\n"
+        text += f"Время: {event_start}-{event_end}\n"
+        text += f"Адрес: {address}\n"
+        text += f"Нужно человек: {required_employees}\n"
+        text += f"\nНазначить сотрудника сейчас?"
+        
+        if hasattr(message_or_query, 'edit_message_text'):
+            await message_or_query.edit_message_text(text, reply_markup=keyboard)
+        else:
+            await message_or_query.reply_text(text, reply_markup=keyboard)
+    
     async def admin_assign_employee_decision(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         
         if query.data == "assign_yes":
-            employees = await self.db.get_all_employees()
-            if not employees:
-                await query.edit_message_text("Нет сотрудников в базе.")
+            try:
+                employees = await self.db.get_all_employees()
+                if not employees:
+                    # Try to get all users to debug
+                    all_users = await self.db.get_all_users()
+                    import logging
+                    logging.warning(f"No employees found, but total users: {len(all_users)}")
+                    for user in all_users:
+                        logging.warning(f"User: {user['user_id']}, is_admin: {user.get('is_admin')}")
+                    
+                    await query.edit_message_text(
+                        "Нет сотрудников в базе.\n"
+                        "Добавьте сотрудников через меню '5. Управление сотрудниками' -> 'Добавить сотрудника'"
+                    )
+                    return ConversationHandler.END
+                
+                keyboard = get_employee_selection_keyboard(employees)
+                await query.edit_message_text(
+                    "Выберите сотрудника:",
+                    reply_markup=keyboard
+                )
+                return WAITING_ASSIGN_EMPLOYEE
+            except Exception as e:
+                import logging
+                logging.error(f"Error in admin_assign_employee_decision: {e}", exc_info=True)
+                await query.edit_message_text(
+                    f"Ошибка при получении списка сотрудников: {str(e)}\n"
+                    "Попробуйте еще раз."
+                )
                 return ConversationHandler.END
-            
-            keyboard = get_employee_selection_keyboard(employees)
-            await query.edit_message_text(
-                "Выберите сотрудника:",
-                reply_markup=keyboard
-            )
-            return WAITING_ASSIGN_EMPLOYEE
         else:
-            # Just create open slot
-            event_date = context.user_data.get('event_date')
-            event_start = context.user_data.get('event_start')
-            event_end = context.user_data.get('event_end')
-            
-            await self.db.add_schedule_slot(event_date, event_start, event_end, is_open=True)
-            await query.edit_message_text("Слот создан и открыт для записи.")
+            # Slot created, open for employees to sign up
+            await query.edit_message_text("✅ Слот создан и открыт для записи сотрудников.")
+            # Clean up context
+            for key in ['event_date', 'event_start', 'event_end', 'event_address', 'created_slot_id']:
+                context.user_data.pop(key, None)
             return ConversationHandler.END
 
     async def admin_assign_employee(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -380,17 +567,31 @@ class BotHandlers:
         
         if query.data.startswith("emp_"):
             emp_id = int(query.data.split("_")[1])
-            event_date = context.user_data.get('event_date')
-            event_start = context.user_data.get('event_start')
-            event_end = context.user_data.get('event_end')
+            slot_id = context.user_data.get('created_slot_id')
             
-            # Create slot and assign
-            slot_id = await self.db.add_schedule_slot(event_date, event_start, event_end, is_open=False)
+            if not slot_id:
+                await query.edit_message_text("Ошибка: слот не найден.")
+                return ConversationHandler.END
+            
             try:
                 await self.db.assign_shift(slot_id, emp_id)
-                await query.edit_message_text(f"Событие создано и назначено сотруднику.")
+                # Mark slot as not open since it's assigned
+                await self.db.update_slot_open_status(slot_id, False)
+                
+                employee_name = await self.db.get_user_display_name(emp_id)
+                await query.edit_message_text(
+                    f"✅ Слот назначен сотруднику: {employee_name}"
+                )
             except ValueError as e:
                 await query.edit_message_text(f"Ошибка: {str(e)}")
+            except Exception as e:
+                import logging
+                logging.error(f"Error assigning employee: {e}", exc_info=True)
+                await query.edit_message_text(f"Ошибка при назначении: {str(e)}")
+            
+            # Clean up context
+            for key in ['event_date', 'event_start', 'event_end', 'event_address', 'created_slot_id']:
+                context.user_data.pop(key, None)
             return ConversationHandler.END
         return WAITING_ASSIGN_EMPLOYEE
 
@@ -418,7 +619,7 @@ class BotHandlers:
                 await query.edit_message_text("Нет событий на эту дату.")
                 return ConversationHandler.END
             
-            keyboard = get_slot_selection_keyboard(slots)
+            keyboard = get_slot_selection_keyboard(slots, show_address=True)
             await query.edit_message_text(
                 f"Дата: {date_str}\nВыберите событие для удаления:",
                 reply_markup=keyboard
@@ -645,6 +846,12 @@ class BotHandlers:
         query = update.callback_query
         await query.answer()
         
+        # Check if user is admin
+        user_id = update.effective_user.id
+        if not await self.is_admin(user_id):
+            # This is not an admin, let employee handler process it
+            return ConversationHandler.END
+        
         if query.data.startswith("slot_"):
             slot_id = int(query.data.split("_")[1])
             context.user_data['shift_slot_id'] = slot_id
@@ -813,33 +1020,62 @@ class BotHandlers:
 
     async def employee_schedule(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Employee: View schedule"""
+        import logging
+        logging.info(f"employee_schedule called for user {update.effective_user.id}")
         keyboard = get_date_selection_keyboard()
         await update.message.reply_text(
             "Выберите дату или введите диапазон дат:",
             reply_markup=keyboard
         )
+        logging.info(f"employee_schedule returning WAITING_SCHEDULE_DATE")
+        return WAITING_SCHEDULE_DATE
 
     async def employee_schedule_date_selected(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        import logging
+        logging.info(f"employee_schedule_date_selected called")
         query = update.callback_query
-        await query.answer()
+        if query:
+            logging.info(f"Callback data: {query.data}")
+            await query.answer()
+        else:
+            logging.error("employee_schedule_date_selected called without callback_query")
+            return ConversationHandler.END
         
         if query.data.startswith("date_"):
-            date_str = query.data.split("_")[1]
-            user_id = update.effective_user.id
-            
-            slots = await self.db.get_schedule_slots_by_range(date_str, date_str, user_id)
-            
-            if not slots:
-                await query.edit_message_text("Нет смен на эту дату.")
+            try:
+                date_str = query.data.split("_")[1]
+                user_id = update.effective_user.id
+                
+                slots = await self.db.get_schedule_slots_by_range(date_str, date_str, user_id)
+                
+                if not slots:
+                    await query.edit_message_text("Нет смен на эту дату.")
+                    return ConversationHandler.END
+                
+                schedule_text = f"Ваше расписание на {date_str}:\n\n"
+                has_shifts = False
+                for slot in slots:
+                    if slot.get('employee_id') == user_id:  # If assigned to this employee
+                        schedule_text += f"  {slot['start_time']}-{slot['end_time']}"
+                        if slot.get('address'):
+                            schedule_text += f"\n    📍 {slot['address']}"
+                        required = slot.get('required_employees', 1)
+                        schedule_text += f"\n    👥 Нужно: {required} чел.\n"
+                        has_shifts = True
+                
+                if not has_shifts:
+                    await query.edit_message_text("Нет назначенных смен на эту дату.")
+                else:
+                    await query.edit_message_text(schedule_text)
                 return ConversationHandler.END
-            
-            schedule_text = f"Ваше расписание на {date_str}:\n\n"
-            for slot in slots:
-                if slot.get('employee_id') == user_id:  # If assigned to this employee
-                    schedule_text += f"  {slot['start_time']}-{slot['end_time']}\n"
-            
-            await query.edit_message_text(schedule_text)
-            return ConversationHandler.END
+            except Exception as e:
+                import logging
+                logging.error(f"Error in employee_schedule_date_selected: {e}", exc_info=True)
+                try:
+                    await query.edit_message_text(f"Произошла ошибка: {str(e)}")
+                except:
+                    pass
+                return ConversationHandler.END
         return WAITING_SCHEDULE_DATE
 
     async def employee_schedule_range(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -870,7 +1106,11 @@ class BotHandlers:
                     if slot_date != current_date:
                         current_date = slot_date
                         schedule_text += f"\n📅 {current_date}:\n"
-                    schedule_text += f"  {slot['start_time']}-{slot['end_time']}\n"
+                    schedule_text += f"  {slot['start_time']}-{slot['end_time']}"
+                    if slot.get('address'):
+                        schedule_text += f"\n    📍 {slot['address']}"
+                    required = slot.get('required_employees', 1)
+                    schedule_text += f"\n    👥 Нужно: {required} чел.\n"
             
             await update.message.reply_text(schedule_text)
             return ConversationHandler.END
@@ -881,30 +1121,150 @@ class BotHandlers:
             )
             return WAITING_SCHEDULE_DATE_RANGE
 
-    async def employee_free_time(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Employee: Set free time"""
+    async def employee_available_slots(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Employee: View and sign up for available slots"""
         keyboard = get_date_selection_keyboard()
         await update.message.reply_text(
-            "Выберите день для выставления свободного времени:",
+            "Выберите дату для просмотра доступных слотов:",
             reply_markup=keyboard
         )
-
-    async def employee_free_time_date_selected(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        return WAITING_EMPLOYEE_SLOT_SELECTION
+    
+    async def employee_slot_date_selected(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle date selection for available slots"""
         query = update.callback_query
         await query.answer()
         
         if query.data.startswith("date_"):
             date_str = query.data.split("_")[1]
-            context.user_data['free_time_date'] = date_str
+            context.user_data['employee_slot_date'] = date_str
             
+            # Get open slots for this date
+            slots = await self.db.get_schedule_slots_by_range(date_str, date_str, only_open=True)
+            
+            if not slots:
+                await query.edit_message_text(
+                    f"На {date_str} нет доступных слотов для записи."
+                )
+                return ConversationHandler.END
+            
+            # Show slots with address
+            text = f"📅 Доступные слоты на {date_str}:\n\n"
+            for slot in slots:
+                text += f"🕐 {slot['start_time']}-{slot['end_time']}\n"
+                if slot.get('address'):
+                    text += f"📍 {slot['address']}\n"
+                required = slot.get('required_employees', 1)
+                text += f"👥 Нужно: {required} чел.\n\n"
+            
+            keyboard = get_slot_selection_keyboard(slots, show_address=True)
             await query.edit_message_text(
-                f"Дата: {date_str}\n"
-                "Введите слоты в формате:\n"
-                "ЧЧ:ММ ЧЧ:ММ\n"
-                "ЧЧ:ММ ЧЧ:ММ\n"
-                "(можно несколько слотов, каждый с новой строки)"
+                f"Выберите слот для записи:",
+                reply_markup=keyboard
             )
-            return WAITING_FREE_TIME_SLOTS
+            return WAITING_EMPLOYEE_SLOT_SELECTION
+        return WAITING_EMPLOYEE_SLOT_SELECTION
+    
+    async def employee_slot_selected(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle slot selection for employee signup"""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data.startswith("slot_"):
+            slot_id = int(query.data.split("_")[1])
+            user_id = update.effective_user.id
+            user = update.effective_user
+            
+            try:
+                # Ensure user exists in database
+                user_in_db = await self.db.get_user_by_id(user_id)
+                if not user_in_db:
+                    # Add user to database
+                    await self.db.add_user(
+                        user_id=user_id,
+                        username=user.username,
+                        full_name=user.full_name,
+                        is_admin=False
+                    )
+                
+                await self.db.assign_shift(slot_id, user_id)
+                # Mark slot as not open
+                await self.db.update_slot_open_status(slot_id, False)
+                
+                # Get slot details for confirmation
+                date_str = context.user_data.get('employee_slot_date', '2025-01-01')
+                slots = await self.db.get_schedule_slots_by_range(date_str, date_str)
+                slot = next((s for s in slots if s['id'] == slot_id), None)
+                
+                text = "✅ Вы успешно записались на слот!\n\n"
+                if slot:
+                    text += f"Дата: {slot['date']}\n"
+                    text += f"Время: {slot['start_time']}-{slot['end_time']}\n"
+                    if slot.get('address'):
+                        text += f"Адрес: {slot['address']}\n"
+                    required = slot.get('required_employees', 1)
+                    text += f"Нужно человек: {required}\n"
+                
+                await query.edit_message_text(text)
+                
+                # Clean up
+                context.user_data.pop('employee_slot_date', None)
+                return ConversationHandler.END
+            except ValueError as e:
+                await query.edit_message_text(f"❌ Ошибка: {str(e)}")
+                return ConversationHandler.END
+            except Exception as e:
+                import logging
+                logging.error(f"Error in employee_slot_selected: {e}", exc_info=True)
+                await query.edit_message_text(f"❌ Произошла ошибка: {str(e)}")
+                return ConversationHandler.END
+        
+        return WAITING_EMPLOYEE_SLOT_SELECTION
+
+    async def employee_free_time(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Employee: Set free time"""
+        import logging
+        logging.info(f"employee_free_time called for user {update.effective_user.id}")
+        keyboard = get_date_selection_keyboard()
+        await update.message.reply_text(
+            "Выберите день для выставления свободного времени:",
+            reply_markup=keyboard
+        )
+        logging.info(f"employee_free_time returning WAITING_FREE_TIME_DATE")
+        return WAITING_FREE_TIME_DATE
+
+    async def employee_free_time_date_selected(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        import logging
+        logging.info(f"employee_free_time_date_selected called")
+        query = update.callback_query
+        if query:
+            logging.info(f"Callback data: {query.data}")
+            await query.answer()
+        else:
+            logging.error("employee_free_time_date_selected called without callback_query")
+            return ConversationHandler.END
+        
+        if query.data.startswith("date_"):
+            try:
+                date_str = query.data.split("_")[1]
+                context.user_data['free_time_date'] = date_str
+                
+                await query.edit_message_text(
+                    f"Дата: {date_str}\n"
+                    "Введите слоты в формате:\n"
+                    "ЧЧ:ММ ЧЧ:ММ\n"
+                    "ЧЧ:ММ ЧЧ:ММ\n"
+                    "(можно несколько слотов, каждый с новой строки)"
+                )
+                return WAITING_FREE_TIME_SLOTS
+            except Exception as e:
+                import logging
+                logging.error(f"Error in employee_free_time_date_selected: {e}", exc_info=True)
+                try:
+                    await query.edit_message_text(f"Произошла ошибка: {str(e)}")
+                except:
+                    pass
+                return ConversationHandler.END
         return WAITING_FREE_TIME_DATE
 
     async def employee_free_time_slots(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1159,6 +1519,9 @@ class BotHandlers:
         query = update.callback_query
         await query.answer()
         
+        # Mark that we're in remove worker flow
+        context.user_data['action'] = 'remove_worker'
+        
         employees = await self.db.get_all_employees()
         if not employees:
             keyboard = get_worker_management_keyboard()
@@ -1177,7 +1540,13 @@ class BotHandlers:
         query = update.callback_query
         await query.answer()
         
+        # Only process if we're in the remove worker flow
+        # Check if action is 'remove_worker' - if not, this is from another conversation
         if query.data.startswith("emp_"):
+            if context.user_data.get('action') != 'remove_worker':
+                # This callback is from a different conversation, ignore it
+                return ConversationHandler.END
+            
             emp_id = int(query.data.split("_")[1])
             
             try:
@@ -1187,12 +1556,22 @@ class BotHandlers:
                     await query.edit_message_text("Сотрудник не найден.", reply_markup=keyboard)
                     return WAITING_WORKER_MENU
                 
+                # Check if user is admin
+                if user.get('is_admin'):
+                    keyboard = get_worker_management_keyboard()
+                    await query.edit_message_text(
+                        "Нельзя удалить администратора.",
+                        reply_markup=keyboard
+                    )
+                    return WAITING_WORKER_MENU
+                
                 keyboard = get_yes_no_keyboard("confirm_remove")
                 context.user_data['remove_worker_id'] = emp_id
                 await query.edit_message_text(
                     f"Подтвердите удаление сотрудника:\n"
                     f"ID: {emp_id}\n"
                     f"Имя: {user.get('full_name') or 'Не указано'}\n"
+                    f"⚠️ Все назначенные смены будут удалены."
                     f"Username: @{user.get('username') or 'не указан'}",
                     reply_markup=keyboard
                 )
@@ -1223,21 +1602,106 @@ class BotHandlers:
             await query.edit_message_text("Удаление отменено.", reply_markup=keyboard)
             return WAITING_WORKER_MENU
 
+    async def admin_view_employee_free_time(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Admin: View employee free time"""
+        # Mark that we're in free_time view flow
+        context.user_data.clear()
+        context.user_data['action'] = 'view_free_time'
+        
+        employees = await self.db.get_all_employees()
+        if not employees:
+            await update.message.reply_text("Нет сотрудников в базе.")
+            return ConversationHandler.END
+        
+        keyboard = get_employee_selection_keyboard(employees)
+        await update.message.reply_text(
+            "Выберите сотрудника для просмотра свободного времени:",
+            reply_markup=keyboard
+        )
+        return WAITING_FREE_TIME_EMPLOYEE
+    
+    async def admin_free_time_employee_selected(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle employee selection for free time view - only works in WAITING_FREE_TIME_EMPLOYEE state"""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data.startswith("emp_"):
+            # Only process if we're in the free_time view flow
+            # Check if action is 'view_free_time' - if not, this is from another conversation
+            if context.user_data.get('action') != 'view_free_time':
+                # This callback is from a different conversation, ignore it
+                return ConversationHandler.END
+            
+            emp_id = int(query.data.split("_")[1])
+            
+            try:
+                # Get employee info
+                employee = await self.db.get_user_by_id(emp_id)
+                if not employee:
+                    await query.edit_message_text("Сотрудник не найден.")
+                    return ConversationHandler.END
+                
+                # Get all free time slots
+                free_time_slots = await self.db.get_employee_free_time(emp_id)
+                
+                if not free_time_slots:
+                    employee_name = employee.get('full_name') or employee.get('username') or f"ID: {emp_id}"
+                    await query.edit_message_text(
+                        f"У сотрудника {employee_name} нет указанного свободного времени."
+                    )
+                    return ConversationHandler.END
+                
+                # Format free time slots
+                text = f"Свободное время сотрудника:\n"
+                employee_name = employee.get('full_name') or employee.get('username') or f"ID: {emp_id}"
+                text += f"👤 {employee_name}\n\n"
+                
+                current_date = None
+                for slot in free_time_slots:
+                    slot_date = slot['date']
+                    if slot_date != current_date:
+                        current_date = slot_date
+                        text += f"\n📅 {current_date}:\n"
+                    
+                    start_time = slot['start_time']
+                    end_time = slot['end_time']
+                    text += f"  🕐 {start_time}-{end_time}\n"
+                
+                await query.edit_message_text(text)
+                return ConversationHandler.END
+            except Exception as e:
+                import logging
+                logging.error(f"Error in admin_free_time_employee_selected: {e}", exc_info=True)
+                await query.edit_message_text(f"Произошла ошибка: {str(e)}")
+                return ConversationHandler.END
+        
+        return WAITING_FREE_TIME_EMPLOYEE
+
     async def admin_list_workers(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Admin: List all workers"""
+        import logging
+        logger = logging.getLogger(__name__)
         query = update.callback_query
         await query.answer()
         
         users = await self.db.get_all_users()
+        logger.error(f"DEBUG admin_list_workers: found {len(users)} total users")
+        for user in users:
+            logger.error(f"DEBUG User in list: {user['user_id']}, is_admin={user.get('is_admin')}, name={user.get('full_name')}")
+        
         if not users:
-            await query.edit_message_text("Нет сотрудников в базе.")
+            keyboard = get_worker_management_keyboard()
+            await query.edit_message_text("Нет пользователей в базе.", reply_markup=keyboard)
             return WAITING_WORKER_MENU
         
-        text = "Список всех пользователей:\n\n"
+        text = f"Список всех пользователей ({len(users)}):\n\n"
         for user in users:
-            role = "Админ" if user['is_admin'] else "Сотрудник"
+            is_admin = user.get('is_admin')
+            role = "Админ" if is_admin else "Сотрудник"
             user_id = user['user_id']
-            full_name = user.get('full_name') or f'User {user_id}'
+            full_name = user.get('full_name')
+            if not full_name or not full_name.strip():
+                full_name = f'User {user_id}'
             text += f"• {full_name}\n"
             text += f"  ID: {user_id}\n"
             if user.get('username'):

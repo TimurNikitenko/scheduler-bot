@@ -44,7 +44,9 @@ from bot.handlers import (
     WAITING_SALARY_PERIOD, WAITING_SCHEDULE_DATE_RANGE, WAITING_SCHEDULE_DATE,
     WAITING_FREE_TIME_DATE, WAITING_FREE_TIME_SLOTS,
     WAITING_WORKER_MENU, WAITING_WORKER_USER_ID, WAITING_WORKER_NAME, WAITING_ADMIN_USER_ID,
-    WAITING_PERIOD_START, WAITING_PERIOD_END
+    WAITING_PERIOD_START, WAITING_PERIOD_END,
+    WAITING_EVENT_ADDRESS, WAITING_EMPLOYEE_SLOT_SELECTION,
+    WAITING_FREE_TIME_EMPLOYEE, WAITING_EVENT_EMPLOYEES_COUNT
 )
 
 
@@ -104,13 +106,21 @@ async def main():
             WAITING_EVENT_DATE: [
                 CallbackQueryHandler(handlers.admin_add_event, pattern="^add_event$"),
                 CallbackQueryHandler(handlers.admin_delete_event, pattern="^delete_event$"),
-                CallbackQueryHandler(handlers.admin_event_date_selected, pattern="^date_"),
+                CallbackQueryHandler(handlers.admin_event_date_selected, pattern="^(date_|back)")
             ],
             WAITING_EVENT_START: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.admin_event_start)
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.admin_event_start),
+                CallbackQueryHandler(handlers.admin_event_date_selected, pattern="^back$")
             ],
             WAITING_EVENT_END: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.admin_event_end)
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.admin_event_end),
+                CallbackQueryHandler(handlers.admin_event_start, pattern="^back$")
+            ],
+            WAITING_EVENT_ADDRESS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.admin_event_address)
+            ],
+            WAITING_EVENT_EMPLOYEES_COUNT: [
+                CallbackQueryHandler(handlers.admin_event_employees_count, pattern="^(count_|back)")
             ],
             WAITING_ASSIGN_EMPLOYEE: [
                 CallbackQueryHandler(handlers.admin_assign_employee_decision, pattern="^assign_"),
@@ -214,14 +224,33 @@ async def main():
         },
         fallbacks=[
             CommandHandler("cancel", handlers.cancel),
-            MessageHandler(filters.Regex("^(1\. Расписание|2\. Редактировать расписание|3\. Отчет|4\. Поставить смены|5\. Управление сотрудниками|1\. Моя зарплата|2\. Мое расписание|3\. Выставить свободное время)$"), handlers.handle_menu_command_in_conversation)
+            MessageHandler(filters.Regex("^(1\. Расписание|2\. Редактировать расписание|3\. Отчет|4\. Поставить смены|5\. Управление сотрудниками|1\. Моя зарплата|2\. Мое расписание|3\. Доступные слоты)$"), handlers.handle_menu_command_in_conversation)
         ]
     )
     application.add_handler(employee_schedule_conv)
 
+    # Employee: Available slots (sign up)
+    employee_available_slots_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^3\. Доступные слоты$"), handlers.employee_available_slots)],
+        states={
+            WAITING_EMPLOYEE_SLOT_SELECTION: [
+                CallbackQueryHandler(handlers.employee_slot_date_selected, pattern="^date_"),
+                CallbackQueryHandler(handlers.employee_slot_selected, pattern="^slot_")
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", handlers.cancel),
+            MessageHandler(filters.Regex("^(1\. Расписание|2\. Редактировать расписание|3\. Отчет|4\. Поставить смены|5\. Управление сотрудниками|1\. Моя зарплата|2\. Мое расписание|3\. Доступные слоты)$"), handlers.handle_menu_command_in_conversation)
+        ]
+    )
+    application.add_handler(employee_available_slots_conv)
+
     # Employee: Free time
     employee_free_time_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^3\. Выставить свободное время$"), handlers.employee_free_time)],
+        entry_points=[
+            MessageHandler(filters.Regex("^4\. Указать свободное время$"), handlers.employee_free_time),
+            MessageHandler(filters.Regex("^3\. Выставить свободное время$"), handlers.employee_free_time)  # For backward compatibility
+        ],
         states={
             WAITING_FREE_TIME_DATE: [
                 CallbackQueryHandler(handlers.employee_free_time_date_selected, pattern="^date_")
@@ -232,7 +261,7 @@ async def main():
         },
         fallbacks=[
             CommandHandler("cancel", handlers.cancel),
-            MessageHandler(filters.Regex("^(1\. Расписание|2\. Редактировать расписание|3\. Отчет|4\. Поставить смены|5\. Управление сотрудниками|1\. Моя зарплата|2\. Мое расписание|3\. Выставить свободное время)$"), handlers.handle_menu_command_in_conversation)
+            MessageHandler(filters.Regex("^(1\. Расписание|2\. Редактировать расписание|3\. Отчет|4\. Поставить смены|5\. Управление сотрудниками|6\. Сотрудник свободен в|1\. Моя зарплата|2\. Мое расписание|3\. Доступные слоты|4\. Указать свободное время)$"), handlers.handle_menu_command_in_conversation)
         ]
     )
     application.add_handler(employee_free_time_conv)
@@ -261,10 +290,25 @@ async def main():
         },
         fallbacks=[
             CommandHandler("cancel", handlers.cancel),
-            MessageHandler(filters.Regex("^(1\. Расписание|2\. Редактировать расписание|3\. Отчет|4\. Поставить смены|5\. Управление сотрудниками|1\. Моя зарплата|2\. Мое расписание|3\. Выставить свободное время)$"), handlers.handle_menu_command_in_conversation)
+            MessageHandler(filters.Regex("^(1\. Расписание|2\. Редактировать расписание|3\. Отчет|4\. Поставить смены|5\. Управление сотрудниками|6\. Сотрудник свободен в|1\. Моя зарплата|2\. Мое расписание|3\. Доступные слоты|4\. Указать свободное время)$"), handlers.handle_menu_command_in_conversation)
         ]
     )
     application.add_handler(admin_worker_conv)
+
+    # Admin: View employee free time
+    admin_free_time_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^6\. Сотрудник свободен в$"), handlers.admin_view_employee_free_time)],
+        states={
+            WAITING_FREE_TIME_EMPLOYEE: [
+                CallbackQueryHandler(handlers.admin_free_time_employee_selected, pattern="^emp_")
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", handlers.cancel),
+            MessageHandler(filters.Regex("^(1\. Расписание|2\. Редактировать расписание|3\. Отчет|4\. Поставить смены|5\. Управление сотрудниками|6\. Сотрудник свободен в|1\. Моя зарплата|2\. Мое расписание|3\. Доступные слоты)$"), handlers.handle_menu_command_in_conversation)
+        ]
+    )
+    application.add_handler(admin_free_time_conv)
 
     # Add error handler
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -279,11 +323,13 @@ async def main():
 
     # Run bot
     logger.info("Bot starting...")
+    updater_started = False
     try:
         # application.run_polling() handles async internally
         await application.initialize()
         await application.start()
         await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        updater_started = True
         logger.info("Bot is running. Press Ctrl+C to stop.")
         # Keep the bot running until interrupted
         stop_event = asyncio.Event()
@@ -291,11 +337,28 @@ async def main():
             await stop_event.wait()
         except KeyboardInterrupt:
             logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Error during bot initialization or runtime: {e}", exc_info=True)
+        raise
     finally:
-        await application.updater.stop()
-        await application.stop()
-        await application.shutdown()
-        await db.close_pool()
+        # Cleanup - only stop what was started
+        if updater_started:
+            try:
+                await application.updater.stop()
+            except Exception as e:
+                logger.warning(f"Error stopping updater: {e}")
+        try:
+            await application.stop()
+        except Exception as e:
+            logger.warning(f"Error stopping application: {e}")
+        try:
+            await application.shutdown()
+        except Exception as e:
+            logger.warning(f"Error shutting down application: {e}")
+        try:
+            await db.close_pool()
+        except Exception as e:
+            logger.warning(f"Error closing database pool: {e}")
         logger.info("Bot shutdown complete")
 
 
