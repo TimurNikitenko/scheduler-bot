@@ -1,15 +1,2 @@
-# Auto detect text files and perform LF normalization
-* text=auto
-
-# Python files
-*.py text eol=lf
-
-# Shell scripts
+# Устанавливаем права на выполнение для всех .sh файлов
 *.sh text eol=lf
-
-# Config files
-*.yaml text eol=lf
-*.yml text eol=lf
-*.md text eol=lf
-*.txt text eol=lf
-

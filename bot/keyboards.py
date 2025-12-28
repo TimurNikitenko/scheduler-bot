@@ -125,6 +125,7 @@ def get_worker_management_keyboard(show_back: bool = False) -> InlineKeyboardMar
         [InlineKeyboardButton("Добавить сотрудника", callback_data="add_worker")],
         [InlineKeyboardButton("Удалить сотрудника", callback_data="remove_worker")],
         [InlineKeyboardButton("Список сотрудников", callback_data="list_workers")],
+        [InlineKeyboardButton("Редактировать имя", callback_data="edit_employee_name")],
         [InlineKeyboardButton("Назначить админа", callback_data="make_admin")]
     ]
     if show_back:

@@ -17,11 +17,21 @@ class Database:
 
     async def init_pool(self):
         """Initialize connection pool"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
         if self._pool is None:
+            logger.info(f"Creating connection pool with URL: {self.db_url[:50]}...")
             # Parse connection string for asyncpg
             # asyncpg uses postgresql:// but we need to convert from psycopg2 format
-            self._pool = await asyncpg.create_pool(self.db_url, min_size=1, max_size=10)
-            await self.init_db()
+            try:
+                self._pool = await asyncpg.create_pool(self.db_url, min_size=1, max_size=10)
+                logger.info("Connection pool created successfully")
+                await self.init_db()
+                logger.info("Database initialization completed")
+            except Exception as e:
+                logger.error(f"Error creating connection pool: {e}", exc_info=True)
+                raise
 
     async def close_pool(self):
         """Close connection pool"""
@@ -36,70 +46,138 @@ class Database:
 
     async def init_db(self):
         """Initialize database schema"""
-        async with self._pool.acquire() as conn:
-            # Users table (employees and admins)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id BIGINT PRIMARY KEY,
-                    username VARCHAR(255),
-                    full_name VARCHAR(255),
-                    is_admin BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            logger.info("Starting database schema initialization...")
+            async with self._pool.acquire() as conn:
+                logger.info("Connection acquired, creating users table...")
+                # Users table (employees and admins)
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        user_id BIGINT PRIMARY KEY,
+                        username VARCHAR(255),
+                        full_name VARCHAR(255),
+                        is_admin BOOLEAN DEFAULT FALSE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                logger.info("Users table created/verified")
+                
+                logger.info("Creating schedule_slots table...")
+                # Schedule slots (template schedule)
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS schedule_slots (
+                        id SERIAL PRIMARY KEY,
+                        date DATE NOT NULL,
+                        start_time TIME NOT NULL,
+                        end_time TIME NOT NULL,
+                        address TEXT,
+                        location_latitude REAL,
+                        location_longitude REAL,
+                        required_employees INTEGER DEFAULT 1,
+                        is_open BOOLEAN DEFAULT TRUE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                logger.info("Schedule_slots table created/verified")
+                
+                logger.info("Adding columns to schedule_slots if needed...")
+                # Add new columns if they don't exist (for existing databases)
+                await conn.execute("""
+                    DO $$ 
+                    BEGIN
+                        ALTER TABLE schedule_slots ADD COLUMN IF NOT EXISTS address TEXT;
+                        ALTER TABLE schedule_slots ADD COLUMN IF NOT EXISTS location_latitude REAL;
+                        ALTER TABLE schedule_slots ADD COLUMN IF NOT EXISTS location_longitude REAL;
+                        ALTER TABLE schedule_slots ADD COLUMN IF NOT EXISTS required_employees INTEGER DEFAULT 1;
+                    EXCEPTION
+                        WHEN duplicate_column THEN NULL;
+                    END $$;
+                """)
+                logger.info("Columns added/verified")
+                
+                logger.info("Creating shifts table...")
+                # Shifts (assigned employees to slots)
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS shifts (
+                        id SERIAL PRIMARY KEY,
+                        slot_id INTEGER REFERENCES schedule_slots(id) ON DELETE CASCADE,
+                        employee_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
+                        date DATE NOT NULL,
+                        start_time TIME NOT NULL,
+                        end_time TIME NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                logger.info("Shifts table created/verified")
+                
+                logger.info("Creating free_time_slots table...")
+                # Free time slots (employee availability)
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS free_time_slots (
+                        id SERIAL PRIMARY KEY,
+                        employee_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
+                        date DATE NOT NULL,
+                        start_time TIME NOT NULL,
+                        end_time TIME NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                logger.info("Free_time_slots table created/verified")
+                logger.info("Database schema initialization completed successfully")
+        except Exception as e:
+            logger.error(f"Error initializing database schema: {e}", exc_info=True)
+            raise
+    
+    async def initialize_admins(self, admin_ids: List[int]):
+        """Initialize admin users from environment variable"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        if not admin_ids:
+            logger.info("No admin IDs provided, skipping admin initialization")
+            return
+        
+        self._ensure_pool()
+        try:
+            logger.info(f"Initializing {len(admin_ids)} admin users...")
+            async with self._pool.acquire() as conn:
+                for admin_id in admin_ids:
+                    try:
+                        # Check if user already exists
+                        existing = await conn.fetchrow(
+                            "SELECT user_id, is_admin FROM users WHERE user_id = $1",
+                            admin_id
+                        )
+                        
+                        if existing:
+                            # Update existing user to admin if not already
+                            if not existing['is_admin']:
+                                await conn.execute(
+                                    "UPDATE users SET is_admin = TRUE WHERE user_id = $1",
+                                    admin_id
+                                )
+                                logger.info(f"Updated user {admin_id} to admin")
+                            else:
+                                logger.info(f"User {admin_id} is already an admin")
+                        else:
+                            # Create new admin user
+                            await conn.execute("""
+                                INSERT INTO users (user_id, username, full_name, is_admin)
+                                VALUES ($1, NULL, NULL, TRUE)
+                                ON CONFLICT (user_id) 
+                                DO UPDATE SET is_admin = TRUE
+                            """, admin_id)
+                            logger.info(f"Created admin user {admin_id}")
+                    except Exception as e:
+                        logger.error(f"Error initializing admin {admin_id}: {e}", exc_info=True)
             
-            # Schedule slots (template schedule)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS schedule_slots (
-                    id SERIAL PRIMARY KEY,
-                    date DATE NOT NULL,
-                    start_time TIME NOT NULL,
-                    end_time TIME NOT NULL,
-                    address TEXT,
-                    location_latitude REAL,
-                    location_longitude REAL,
-                    required_employees INTEGER DEFAULT 1,
-                    is_open BOOLEAN DEFAULT TRUE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            # Add new columns if they don't exist (for existing databases)
-            await conn.execute("""
-                DO $$ 
-                BEGIN
-                    ALTER TABLE schedule_slots ADD COLUMN IF NOT EXISTS address TEXT;
-                    ALTER TABLE schedule_slots ADD COLUMN IF NOT EXISTS location_latitude REAL;
-                    ALTER TABLE schedule_slots ADD COLUMN IF NOT EXISTS location_longitude REAL;
-                    ALTER TABLE schedule_slots ADD COLUMN IF NOT EXISTS required_employees INTEGER DEFAULT 1;
-                EXCEPTION
-                    WHEN duplicate_column THEN NULL;
-                END $$;
-            """)
-            
-            # Shifts (assigned employees to slots)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS shifts (
-                    id SERIAL PRIMARY KEY,
-                    slot_id INTEGER REFERENCES schedule_slots(id) ON DELETE CASCADE,
-                    employee_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
-                    date DATE NOT NULL,
-                    start_time TIME NOT NULL,
-                    end_time TIME NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
-            # Free time slots (employee availability)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS free_time_slots (
-                    id SERIAL PRIMARY KEY,
-                    employee_id BIGINT REFERENCES users(user_id) ON DELETE CASCADE,
-                    date DATE NOT NULL,
-                    start_time TIME NOT NULL,
-                    end_time TIME NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
+            logger.info("Admin users initialization completed")
+        except Exception as e:
+            logger.error(f"Error initializing admins: {e}", exc_info=True)
+            # Don't raise - this is not critical for bot startup
 
     async def add_user(self, user_id: int, username: str = None, full_name: str = None, is_admin: bool = False):
         self._ensure_pool()
@@ -112,6 +190,51 @@ class Database:
                              full_name = EXCLUDED.full_name,
                              is_admin = EXCLUDED.is_admin
             """, user_id, username, full_name, is_admin)
+
+    async def update_employee_name(self, user_id: int, full_name: str):
+        """Update user's full name (works for both employees and admins)"""
+        self._ensure_pool()
+        async with self._pool.acquire() as conn:
+            result = await conn.execute("""
+                UPDATE users 
+                SET full_name = $1 
+                WHERE user_id = $2
+            """, full_name, user_id)
+            if result == "UPDATE 0":
+                raise ValueError("Пользователь не найден")
+
+    async def get_all_users_for_editing(self) -> List[Tuple[int, str]]:
+        """Get all users (employees and admins) for name editing"""
+        self._ensure_pool()
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT user_id, full_name, username, is_admin
+                FROM users 
+                ORDER BY COALESCE(NULLIF(full_name, ''), username, CAST(user_id AS TEXT))
+            """)
+            result = []
+            for row in rows:
+                user_id = row['user_id']
+                full_name = row['full_name']
+                username = row['username']
+                is_admin = row.get('is_admin', False)
+                
+                # Build display name
+                if full_name and full_name.strip():
+                    display_name = full_name.strip()
+                elif username:
+                    display_name = f"@{username}"
+                else:
+                    display_name = f"User {user_id}"
+                
+                # Add role indicator
+                if is_admin:
+                    display_name = f"👑 {display_name} (Админ)"
+                else:
+                    display_name = f"👤 {display_name}"
+                
+                result.append((user_id, display_name))
+            return result
 
     async def is_admin(self, user_id: int) -> bool:
         self._ensure_pool()

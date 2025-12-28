@@ -26,6 +26,7 @@ services:
     env_file:
       - .env
     environment:
+      # DATABASE_URL должен быть здесь, чтобы переопределить значение из .env
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/telegram_bot
     depends_on:
       postgres:

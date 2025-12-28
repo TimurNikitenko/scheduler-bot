@@ -7,8 +7,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from bot.database import Database
 from bot.handlers import BotHandlers
 
-# Load environment variables
-load_dotenv()
+# Load environment variables (override=False means don't overwrite existing env vars)
+load_dotenv(override=False)
 
 # Configure logging
 logging.basicConfig(
@@ -33,7 +33,11 @@ if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN not found in environment variables")
 
 # Database will be initialized in main()
+# Use environment variable if set (from docker-compose), otherwise use .env or default
 db_url = os.getenv('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/telegram_bot')
+# Log full URL for debugging (mask password)
+db_url_log = db_url.replace('://postgres:', '://postgres:***').replace('@postgres:', '@postgres:')
+logger.info(f"Database URL: {db_url_log}")  # Log URL with masked password
 
 # Import conversation states
 from bot.handlers import (
@@ -47,7 +51,8 @@ from bot.handlers import (
     WAITING_PERIOD_START, WAITING_PERIOD_END,
     WAITING_EVENT_ADDRESS, WAITING_EMPLOYEE_SLOT_SELECTION,
     WAITING_FREE_TIME_EMPLOYEE, WAITING_EVENT_EMPLOYEES_COUNT,
-    WAITING_FREE_TIME_DELETE_DATE, WAITING_FREE_TIME_DELETE_SLOT
+    WAITING_FREE_TIME_DELETE_DATE, WAITING_FREE_TIME_DELETE_SLOT,
+    WAITING_EDIT_NAME_EMPLOYEE, WAITING_EDIT_NAME_INPUT
 )
 
 
@@ -58,6 +63,13 @@ async def main():
         logger.info("Initializing database connection pool...")
         await db.init_pool()
         logger.info("Database connection pool initialized successfully")
+        
+        # Initialize admin users from environment variable
+        if ADMIN_IDS:
+            logger.info(f"Initializing {len(ADMIN_IDS)} admin users from ADMIN_IDS...")
+            await db.initialize_admins(ADMIN_IDS)
+        else:
+            logger.info("No ADMIN_IDS provided, skipping admin initialization")
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}", exc_info=True)
         raise
@@ -124,11 +136,11 @@ async def main():
                 CallbackQueryHandler(handlers.admin_event_employees_count, pattern="^(count_|back)")
             ],
             WAITING_ASSIGN_EMPLOYEE: [
-                CallbackQueryHandler(handlers.admin_assign_employee_decision, pattern="^assign_"),
-                CallbackQueryHandler(handlers.admin_assign_employee, pattern="^emp_")
+                CallbackQueryHandler(handlers.admin_assign_employee_decision, pattern="^(assign_|back)"),
+                CallbackQueryHandler(handlers.admin_assign_employee, pattern="^(emp_|back)")
             ],
             WAITING_DELETE_DATE: [
-                CallbackQueryHandler(handlers.admin_delete_date_selected, pattern="^date_")
+                CallbackQueryHandler(handlers.admin_delete_date_selected, pattern="^(date_|back)")
             ],
             WAITING_DELETE_SLOT: [
                 CallbackQueryHandler(handlers.admin_delete_slot_selected, pattern="^(slot_|confirm_delete_)")
@@ -146,18 +158,18 @@ async def main():
         entry_points=[MessageHandler(filters.Regex("^3\. Отчет$"), handlers.admin_report)],
         states={
             WAITING_REPORT_EMPLOYEE: [
-                CallbackQueryHandler(handlers.admin_report_employee_selected, pattern="^emp_")
+                CallbackQueryHandler(handlers.admin_report_employee_selected, pattern="^(emp_|back)")
             ],
             WAITING_REPORT_PERIOD: [
-                CallbackQueryHandler(handlers.admin_report_period_selected, pattern="^period_"),
+                CallbackQueryHandler(handlers.admin_report_period_selected, pattern="^(period_|back)"),
                 CallbackQueryHandler(handlers.admin_report_period_start_selected, pattern="^period_start_"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.admin_report_period)
             ],
             WAITING_PERIOD_START: [
-                CallbackQueryHandler(handlers.admin_report_period_start_selected, pattern="^period_start_")
+                CallbackQueryHandler(handlers.admin_report_period_start_selected, pattern="^(period_start_|back)")
             ],
             WAITING_PERIOD_END: [
-                CallbackQueryHandler(handlers.admin_report_period_end_selected, pattern="^period_end_")
+                CallbackQueryHandler(handlers.admin_report_period_end_selected, pattern="^(period_end_|back)")
             ],
             WAITING_REPORT_RATE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.admin_report_rate)
@@ -258,6 +270,7 @@ async def main():
                 CallbackQueryHandler(handlers.employee_free_time_date_selected, pattern="^(date_|back)")
             ],
             WAITING_FREE_TIME_SLOTS: [
+                CallbackQueryHandler(handlers.employee_free_time_slots_back, pattern="^back$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.employee_free_time_slots)
             ],
             WAITING_FREE_TIME_DELETE_DATE: [
@@ -282,18 +295,29 @@ async def main():
                 CallbackQueryHandler(handlers.admin_add_worker, pattern="^add_worker$"),
                 CallbackQueryHandler(handlers.admin_remove_worker, pattern="^remove_worker$"),
                 CallbackQueryHandler(handlers.admin_list_workers, pattern="^list_workers$"),
+                CallbackQueryHandler(handlers.admin_edit_employee_name, pattern="^edit_employee_name$"),
                 CallbackQueryHandler(handlers.admin_make_admin, pattern="^make_admin$"),
                 CallbackQueryHandler(handlers.admin_remove_worker_selected, pattern="^emp_"),
                 CallbackQueryHandler(handlers.admin_confirm_remove_worker, pattern="^confirm_remove_")
             ],
             WAITING_WORKER_USER_ID: [
+                CallbackQueryHandler(handlers.admin_add_worker_user_id_back, pattern="^back$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.admin_add_worker_user_id)
             ],
             WAITING_WORKER_NAME: [
+                CallbackQueryHandler(handlers.admin_add_worker_name_back, pattern="^back$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.admin_add_worker_name)
             ],
             WAITING_ADMIN_USER_ID: [
+                CallbackQueryHandler(handlers.admin_make_admin_user_id_back, pattern="^back$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.admin_make_admin_user_id)
+            ],
+            WAITING_EDIT_NAME_EMPLOYEE: [
+                CallbackQueryHandler(handlers.admin_edit_employee_name_selected, pattern="^(emp_|back)")
+            ],
+            WAITING_EDIT_NAME_INPUT: [
+                CallbackQueryHandler(handlers.admin_edit_employee_name_input_back, pattern="^back$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.admin_edit_employee_name_input)
             ],
         },
         fallbacks=[
@@ -308,7 +332,7 @@ async def main():
         entry_points=[MessageHandler(filters.Regex("^6\. Сотрудник свободен в$"), handlers.admin_view_employee_free_time)],
         states={
             WAITING_FREE_TIME_EMPLOYEE: [
-                CallbackQueryHandler(handlers.admin_free_time_employee_selected, pattern="^emp_")
+                CallbackQueryHandler(handlers.admin_free_time_employee_selected, pattern="^(emp_|back)")
             ],
         },
         fallbacks=[

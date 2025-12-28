@@ -15,6 +15,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
+# Ensure bot/__init__.py exists (required for Python module)
+RUN test -f bot/__init__.py || touch bot/__init__.py
+
 # Run the bot
 CMD ["python", "main.py"]
 
